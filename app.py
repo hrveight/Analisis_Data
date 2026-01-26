@@ -9,7 +9,7 @@ import io
 
 # ==================== CONFIG ====================
 st.set_page_config(
-    page_title="PSDKP Insight Engine",
+    page_title="Analisis Data PSDKP",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -387,7 +387,7 @@ def analyze_distribution(df, var_col):
     }
 
 # ==================== NAVIGATION ====================
-st.sidebar.title("PSDKP Insight Engine")
+st.sidebar.title("Analisis Data PSDKP")
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
@@ -406,7 +406,7 @@ st.sidebar.markdown("""
 
 # ==================== PAGE 1: INTRO ====================
 if page == "Intro":
-    st.title("PSDKP Insight Engine")
+    st.title("Analisis Data PSDKP")
     st.markdown("""
     <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                 padding: 2rem; border-radius: 10px; color: white; margin-bottom: 2rem;'>
@@ -1263,4 +1263,5 @@ st.sidebar.markdown("""
     Version 1.0<br>
     <em>Data-Driven Decision Making</em>
 </div>
+
 """, unsafe_allow_html=True)
