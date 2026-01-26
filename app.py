@@ -1259,9 +1259,10 @@ elif page == "Kesimpulan":
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 <div style='font-size: 0.8rem; color: #666;'>
-    <strong>PSDKP Insight Engine</strong><br>
+    <strong>Analisis Data PSDKP</strong><br>
     Version 1.0<br>
     <em>Data-Driven Decision Making</em>
 </div>
 
 """, unsafe_allow_html=True)
+
