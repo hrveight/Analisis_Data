@@ -5,3 +5,10 @@ scipy
 plotly
 openpyxl
 statsmodels
+streamlit
+pandas
+numpy
+plotly
+scipy
+openpyxl
+scikit-learn
