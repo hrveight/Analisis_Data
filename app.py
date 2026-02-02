@@ -9,6 +9,10 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.preprocessing import StandardScaler
+import folium
+from streamlit_folium import folium_static
 
 # ==================== CONFIG ====================
 st.set_page_config(
@@ -171,6 +175,172 @@ def get_columns_by_type(df, type_mapping):
     date = [col for col, t in type_mapping.items() if t == 'Tanggal']
     category = [col for col, t in type_mapping.items() if t == 'Teks/Kategori']
     return numeric, date, category
+
+# ==================== CLUSTERING & GIS FUNCTIONS ====================
+def perform_clustering(df, features, method='kmeans', n_clusters=3, eps=0.5, min_samples=5):
+    """
+    Melakukan analisis clustering
+    
+    Parameters:
+    - df: DataFrame
+    - features: list kolom yang digunakan untuk clustering
+    - method: 'kmeans' atau 'dbscan'
+    - n_clusters: jumlah cluster untuk KMeans
+    - eps: epsilon untuk DBSCAN
+    - min_samples: minimum samples untuk DBSCAN
+    """
+    # Prepare data
+    X = df[features].copy()
+    
+    # Handle missing values
+    X = X.dropna()
+    
+    # Standardize
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Clustering
+    if method == 'kmeans':
+        model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = model.fit_predict(X_scaled)
+        centers = scaler.inverse_transform(model.cluster_centers_)
+    else:  # DBSCAN
+        model = DBSCAN(eps=eps, min_samples=min_samples)
+        labels = model.fit_predict(X_scaled)
+        centers = None
+    
+    # Add cluster labels to original dataframe
+    df_clustered = df.loc[X.index].copy()
+    df_clustered['Cluster'] = labels
+    
+    # Calculate cluster statistics
+    cluster_stats = df_clustered.groupby('Cluster')[features].agg(['mean', 'count'])
+    
+    return {
+        'data': df_clustered,
+        'labels': labels,
+        'n_clusters': len(np.unique(labels)),
+        'cluster_stats': cluster_stats,
+        'centers': centers,
+        'features': features,
+        'method': method,
+        'scaler': scaler
+    }
+
+def create_cluster_map(df, lat_col, lon_col, cluster_col='Cluster', popup_cols=None):
+    """
+    Membuat peta interaktif dengan marker clustering
+    
+    Parameters:
+    - df: DataFrame dengan kolom cluster
+    - lat_col: nama kolom latitude
+    - lon_col: nama kolom longitude
+    - cluster_col: nama kolom cluster
+    - popup_cols: list kolom untuk ditampilkan di popup
+    """
+    # Clean data
+    df_clean = df[[lat_col, lon_col, cluster_col]].dropna()
+    if popup_cols:
+        df_clean = df.loc[df_clean.index, [lat_col, lon_col, cluster_col] + popup_cols]
+    
+    # Center map
+    center_lat = df_clean[lat_col].mean()
+    center_lon = df_clean[lon_col].mean()
+    
+    # Create map
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=6,
+        tiles='OpenStreetMap'
+    )
+    
+    # Color palette for clusters
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 
+              'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 
+              'darkpurple', 'pink', 'lightblue', 'lightgreen', 'gray', 
+              'black', 'lightgray']
+    
+    # Add markers
+    for idx, row in df_clean.iterrows():
+        cluster_id = int(row[cluster_col])
+        color = colors[cluster_id % len(colors)]
+        
+        # Create popup text
+        popup_text = f"<b>Cluster {cluster_id}</b><br>"
+        popup_text += f"Lat: {row[lat_col]:.4f}<br>Lon: {row[lon_col]:.4f}<br>"
+        
+        if popup_cols:
+            for col in popup_cols:
+                if col in row:
+                    popup_text += f"{col}: {row[col]}<br>"
+        
+        folium.CircleMarker(
+            location=[row[lat_col], row[lon_col]],
+            radius=8,
+            popup=folium.Popup(popup_text, max_width=300),
+            color=color,
+            fill=True,
+            fillColor=color,
+            fillOpacity=0.7,
+            weight=2
+        ).add_to(m)
+    
+    # Add legend
+    legend_html = '''
+    <div style="position: fixed; 
+                bottom: 50px; right: 50px; 
+                background-color: white; 
+                border:2px solid grey; 
+                z-index:9999; 
+                font-size:14px;
+                padding: 10px;
+                border-radius: 5px;">
+    <p style="margin: 0; font-weight: bold;">Cluster Legend</p>
+    '''
+    
+    unique_clusters = sorted(df_clean[cluster_col].unique())
+    for cluster_id in unique_clusters:
+        color = colors[int(cluster_id) % len(colors)]
+        count = (df_clean[cluster_col] == cluster_id).sum()
+        legend_html += f'<p style="margin: 5px 0;"><span style="background-color:{color}; padding: 5px 10px; border-radius: 50%; margin-right: 5px;"></span> Cluster {int(cluster_id)} ({count} points)</p>'
+    
+    legend_html += '</div>'
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
+    return m
+
+def create_heatmap(df, lat_col, lon_col, value_col=None):
+    """
+    Membuat heatmap pada peta
+    
+    Parameters:
+    - df: DataFrame
+    - lat_col: nama kolom latitude
+    - lon_col: nama kolom longitude  
+    - value_col: kolom untuk intensity (opsional)
+    """
+    from folium.plugins import HeatMap
+    
+    df_clean = df[[lat_col, lon_col]].dropna()
+    
+    if value_col and value_col in df.columns:
+        df_clean = df.loc[df_clean.index, [lat_col, lon_col, value_col]].copy()
+        heat_data = df_clean[[lat_col, lon_col, value_col]].values.tolist()
+    else:
+        heat_data = df_clean[[lat_col, lon_col]].values.tolist()
+    
+    center_lat = df_clean[lat_col].mean()
+    center_lon = df_clean[lon_col].mean()
+    
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=6,
+        tiles='OpenStreetMap'
+    )
+    
+    HeatMap(heat_data, radius=15, blur=25, max_zoom=13).add_to(m)
+    
+    return m
 
 # ==================== NEW: EXPORT FUNCTIONS ====================
 def create_excel_with_formulas(analysis_result, analysis_type):
@@ -1625,7 +1795,9 @@ elif page == "Analisis":
                     "Forecasting (Prediksi Nilai Masa Depan)",
                     "Correlation Matrix (Korelasi Multi-Variabel)",
                     "Uji Normalitas Lengkap",
-                    "Uji Homogenitas Varians (Levene's Test)"
+                    "Uji Homogenitas Varians (Levene's Test)",
+                    "Analisis Cluster (Pengelompokan Data)",
+                    "Peta GIS & Visualisasi Spasial"
                 ]
             )
             
@@ -1641,6 +1813,10 @@ elif page == "Analisis":
             elif "Normalitas" in advanced_type:
                 analysis_type = advanced_type
             elif "Homogenitas" in advanced_type:
+                analysis_type = advanced_type
+            elif "Cluster" in advanced_type:
+                analysis_type = advanced_type
+            elif "Peta GIS" in advanced_type:
                 analysis_type = advanced_type
         
         st.markdown("---")
@@ -1895,15 +2071,17 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'multiple_regression',
                                 'x_vars': x_vars,
                                 'y_var': y_var,
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
-                            
+                        
                             # Quick preview
                             st.markdown("### Preview Hasil")
                             col1, col2, col3 = st.columns(3)
@@ -1948,13 +2126,15 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'chi_square',
                                 'var1': var1,
                                 'var2': var2,
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
                             
                             # Quick preview
@@ -1998,7 +2178,7 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'forecast',
                                 'date_var': date_var,
                                 'value_var': value_var,
@@ -2006,6 +2186,8 @@ elif page == "Analisis":
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
                             
                             # Quick preview
@@ -2054,12 +2236,14 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'correlation_matrix',
                                 'variables': selected_vars,
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
                             
                             # Quick preview - heatmap
@@ -2109,12 +2293,14 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'normality',
                                 'var_col': var_col,
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
                             
                             # Quick preview
@@ -2157,19 +2343,21 @@ elif page == "Analisis":
                         if 'error' in result:
                             st.error(f"{result['error']}")
                         else:
-                            st.session_state.analysis_results = {
+                            analysis_data = {
                                 'type': 'homogeneity',
                                 'group_var': group_var,
                                 'value_var': value_var,
                                 'result': result,
                                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state.analysis_results = analysis_data
+                            st.session_state.all_analysis_history.append(analysis_data)  # ← INI YANG DITAMBAHKAN
                             st.success("Analisis selesai! Lihat tab 'Hasil & Export'")
                             
                             # Quick preview
                             st.markdown("### Preview Hasil")
                             col1, col2, col3 = st.columns(3)
-                            col1.metric("Levene Statistic", f"{result['stat']:.4f}")
+                            col1.metric("Levene Statistic", f"{r['stat']:.4f}")
                             col2.metric("P-value", f"{result['p_value']:.4f}")
                             col3.metric("Jumlah Kelompok", result['n_groups'])
                             
@@ -2179,6 +2367,331 @@ elif page == "Analisis":
                                 st.warning(f"{result['conclusion']}")
                             
                             st.info(f"**Rekomendasi:** {result['recommendation']}")
+        
+        # ==================== ANALISIS CLUSTER ====================
+        elif "Cluster" in analysis_type:
+            st.subheader("Analisis Cluster (Pengelompokan Data)")
+            
+            st.markdown("""
+            <div class="info-box">
+                <strong>Tentang Analisis Cluster:</strong><br>
+                Mengelompokkan data berdasarkan kemiripan karakteristik. Cocok untuk:
+                <ul>
+                    <li>Segmentasi wilayah berdasarkan karakteristik</li>
+                    <li>Identifikasi pola pengelompokan data</li>
+                    <li>Klasifikasi otomatis tanpa label</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Pilih fitur untuk clustering
+            st.markdown("### Pengaturan Clustering")
+            
+            if len(num_cols) < 2:
+                st.warning("Minimal butuh 2 kolom numerik untuk clustering.")
+            else:
+                selected_features = st.multiselect(
+                    "Pilih fitur untuk clustering (minimal 2):",
+                    num_cols,
+                    default=num_cols[:min(3, len(num_cols))]
+                )
+                
+                if len(selected_features) >= 2:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        clustering_method = st.selectbox(
+                            "Metode Clustering:",
+                            ["KMeans", "DBSCAN"]
+                        )
+                    
+                    with col2:
+                        if clustering_method == "KMeans":
+                            n_clusters = st.slider("Jumlah Cluster:", 2, 10, 3)
+                        else:
+                            eps = st.slider("Epsilon (jarak maksimal):", 0.1, 2.0, 0.5, 0.1)
+                            min_samples = st.slider("Minimum samples per cluster:", 2, 20, 5)
+                    
+                    if st.button("Jalankan Clustering", type="primary", use_container_width=True):
+                        with st.spinner("Melakukan analisis cluster..."):
+                            try:
+                                # Perform clustering
+                                if clustering_method == "KMeans":
+                                    cluster_result = perform_clustering(
+                                        df, 
+                                        selected_features, 
+                                        method='kmeans', 
+                                        n_clusters=n_clusters
+                                    )
+                                else:
+                                    cluster_result = perform_clustering(
+                                        df, 
+                                        selected_features, 
+                                        method='dbscan',
+                                        eps=eps,
+                                        min_samples=min_samples
+                                    )
+                                
+                                # Display results
+                                st.success(f"✓ Clustering selesai! Ditemukan {cluster_result['n_clusters']} cluster")
+                                
+                                # Cluster distribution
+                                st.markdown("### Distribusi Cluster")
+                                cluster_counts = cluster_result['data']['Cluster'].value_counts().sort_index()
+                                
+                                col1, col2 = st.columns([1, 2])
+                                
+                                with col1:
+                                    st.dataframe(
+                                        pd.DataFrame({
+                                            'Cluster': cluster_counts.index,
+                                            'Jumlah Data': cluster_counts.values,
+                                            'Persentase': (cluster_counts.values / cluster_counts.sum() * 100).round(1)
+                                        })
+                                    )
+                                
+                                with col2:
+                                    fig = px.pie(
+                                        values=cluster_counts.values,
+                                        names=cluster_counts.index,
+                                        title="Proporsi Cluster",
+                                        hole=0.4
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Cluster statistics
+                                st.markdown("### Karakteristik Setiap Cluster")
+                                st.dataframe(cluster_result['cluster_stats'], use_container_width=True)
+                                
+                                # Visualization
+                                st.markdown("### Visualisasi Cluster")
+                                
+                                if len(selected_features) >= 2:
+                                    fig = px.scatter(
+                                        cluster_result['data'],
+                                        x=selected_features[0],
+                                        y=selected_features[1],
+                                        color='Cluster',
+                                        title=f"Cluster Berdasarkan {selected_features[0]} vs {selected_features[1]}",
+                                        color_continuous_scale='viridis'
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
+                                if len(selected_features) >= 3:
+                                    fig = px.scatter_3d(
+                                        cluster_result['data'],
+                                        x=selected_features[0],
+                                        y=selected_features[1],
+                                        z=selected_features[2],
+                                        color='Cluster',
+                                        title="Visualisasi 3D Cluster",
+                                        color_continuous_scale='viridis'
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Download clustered data
+                                st.markdown("### Download Data dengan Label Cluster")
+                                csv_data = cluster_result['data'].to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="Download Data Cluster (CSV)",
+                                    data=csv_data,
+                                    file_name=f"data_cluster_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    mime="text/csv"
+                                )
+                                
+                                # Save to session
+                                st.session_state.cluster_result = cluster_result
+                                
+                                # TAMBAHAN BARU - Save to analysis results and history
+                                analysis_data = {
+                                    'type': 'clustering',
+                                    'features': selected_features,
+                                    'method': clustering_method,
+                                    'result': cluster_result,
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                }
+                                st.session_state.analysis_results = analysis_data
+                                st.session_state.all_analysis_history.append(analysis_data)
+                                
+                            except Exception as e:
+                                st.error(f"Error saat clustering: {str(e)}")
+                else:
+                    st.info("Silakan pilih minimal 2 fitur untuk clustering.")
+        
+        # ==================== PETA GIS ====================
+        elif "Peta GIS" in analysis_type:
+            st.subheader("Peta GIS & Visualisasi Spasial")
+            
+            st.markdown("""
+            <div class="info-box">
+                <strong>Tentang Peta GIS:</strong><br>
+                Visualisasi data geografis pada peta interaktif. Cocok untuk:
+                <ul>
+                    <li>Menampilkan sebaran lokasi data</li>
+                    <li>Visualisasi cluster geografis</li>
+                    <li>Analisis pola spasial (heatmap)</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Pilih kolom koordinat
+            st.markdown("### Pengaturan Peta")
+            
+            all_cols = list(df.columns)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                lat_col = st.selectbox(
+                    "Pilih kolom Latitude:",
+                    all_cols,
+                    index=next((i for i, col in enumerate(all_cols) if 'lat' in col.lower()), 0)
+                )
+            
+            with col2:
+                lon_col = st.selectbox(
+                    "Pilih kolom Longitude:",
+                    all_cols,
+                    index=next((i for i, col in enumerate(all_cols) if 'lon' in col.lower() or 'lng' in col.lower()), 0)
+                )
+            
+            # Check if coordinates are valid
+            if lat_col and lon_col:
+                # Try to convert to numeric
+                df_map = df.copy()
+                try:
+                    df_map[lat_col] = pd.to_numeric(df_map[lat_col], errors='coerce')
+                    df_map[lon_col] = pd.to_numeric(df_map[lon_col], errors='coerce')
+                except:
+                    pass
+                
+                # Remove invalid coordinates
+                df_map_clean = df_map[[lat_col, lon_col]].dropna()
+                n_valid = len(df_map_clean)
+                
+                st.info(f"Ditemukan {n_valid} data dengan koordinat valid dari {len(df)} total data")
+                
+                if n_valid > 0:
+                    map_type = st.selectbox(
+                        "Jenis Visualisasi:",
+                        ["Peta Marker", "Peta Cluster", "Heatmap"]
+                    )
+                    
+                    # Additional options based on map type
+                    popup_cols = st.multiselect(
+                        "Kolom tambahan untuk ditampilkan di popup (opsional):",
+                        [col for col in all_cols if col not in [lat_col, lon_col]],
+                        default=[]
+                    )
+                    
+                    # Heatmap intensity option - SEBELUM tombol
+                    heatmap_value_col = None
+                    if map_type == "Heatmap" and num_cols:
+                        heatmap_value_col = st.selectbox(
+                            "Pilih kolom untuk intensity heatmap (opsional):",
+                            ["Tidak ada (densitas saja)"] + num_cols,
+                            key="heatmap_intensity"
+                        )
+                        if heatmap_value_col == "Tidak ada (densitas saja)":
+                            heatmap_value_col = None
+                    
+                    if st.button("Buat Peta", type="primary", use_container_width=True):
+                        with st.spinner("Membuat peta interaktif..."):
+                            try:
+                                if map_type == "Peta Marker":
+                                    # Simple marker map
+                                    center_lat = df_map_clean[lat_col].mean()
+                                    center_lon = df_map_clean[lon_col].mean()
+                                    
+                                    m = folium.Map(
+                                        location=[center_lat, center_lon],
+                                        zoom_start=6,
+                                        tiles='OpenStreetMap'
+                                    )
+                                    
+                                    for idx, row in df_map.dropna(subset=[lat_col, lon_col]).iterrows():
+                                        popup_text = f"<b>Lokasi {idx}</b><br>"
+                                        popup_text += f"Lat: {row[lat_col]:.4f}<br>Lon: {row[lon_col]:.4f}<br>"
+                                        
+                                        for col in popup_cols:
+                                            if col in row:
+                                                popup_text += f"{col}: {row[col]}<br>"
+                                        
+                                        folium.Marker(
+                                            location=[row[lat_col], row[lon_col]],
+                                            popup=folium.Popup(popup_text, max_width=300),
+                                            icon=folium.Icon(color='blue', icon='info-sign')
+                                        ).add_to(m)
+                                    
+                                    folium_static(m, width=1000, height=600)
+                                    # TAMBAHAN BARU: Save map result to session
+                                    map_data = {
+                                        'type': 'gis_map',
+                                        'map_type': map_type,
+                                        'lat_col': lat_col,
+                                        'lon_col': lon_col,
+                                        'n_points': len(df_map.dropna(subset=[lat_col, lon_col])),
+                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    }
+                                    st.session_state.analysis_results = map_data
+                                    st.session_state.all_analysis_history.append(map_data)
+
+                                elif map_type == "Peta Cluster":
+                                    # Check if clustering has been done
+                                    if 'cluster_result' in st.session_state:
+                                        cluster_data = st.session_state.cluster_result['data']
+                                        
+                                        # Check if lat/lon exists in cluster data
+                                        if lat_col in cluster_data.columns and lon_col in cluster_data.columns:
+                                            m = create_cluster_map(
+                                                cluster_data,
+                                                lat_col,
+                                                lon_col,
+                                                cluster_col='Cluster',
+                                                popup_cols=popup_cols
+                                            )
+                                            folium_static(m, width=1000, height=600)
+                                            # TAMBAHAN BARU
+                                            map_data = {
+                                                'type': 'gis_map',
+                                                'map_type': 'Peta Cluster',
+                                                'lat_col': lat_col,
+                                                'lon_col': lon_col,
+                                                'n_clusters': len(cluster_data['Cluster'].unique()),
+                                                'n_points': len(cluster_data),
+                                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                            }
+                                            st.session_state.analysis_results = map_data
+                                            st.session_state.all_analysis_history.append(map_data)
+
+                                        else:
+                                            st.warning("Kolom koordinat tidak ditemukan dalam data cluster. Jalankan clustering dengan data yang memiliki koordinat.")
+                                    else:
+                                        st.warning("Belum ada hasil clustering. Silakan jalankan Analisis Cluster terlebih dahulu.")
+                                
+                                elif map_type == "Heatmap":
+                                    # Gunakan nilai yang sudah dipilih sebelumnya
+                                    m = create_heatmap(df_map, lat_col, lon_col, heatmap_value_col)
+                                    folium_static(m, width=1000, height=600)
+                                    # TAMBAHAN BARU
+                                    map_data = {
+                                        'type': 'gis_map',
+                                        'map_type': 'Heatmap',
+                                        'lat_col': lat_col,
+                                        'lon_col': lon_col,
+                                        'n_points': len(df_map_clean),
+                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    }
+                                    st.session_state.analysis_results = map_data
+                                    st.session_state.all_analysis_history.append(map_data)
+                                
+                                st.success("✓ Peta berhasil dibuat!")
+                                
+                            except Exception as e:
+                                st.error(f"Error saat membuat peta: {str(e)}")
+                                st.info("Pastikan kolom koordinat berisi nilai numerik yang valid (latitude: -90 s/d 90, longitude: -180 s/d 180)")
+                else:
+                    st.warning("Tidak ada data dengan koordinat valid. Pastikan kolom latitude dan longitude berisi angka yang benar.")
 
 # ==================== PAGE 4: HASIL & EXPORT (Enhanced) ====================
 elif page == "Hasil & Export":
@@ -2735,7 +3248,7 @@ elif page == "Hasil & Export":
             st.subheader(f"Uji Homogenitas Varians")
             
             col1, col2, col3 = st.columns(3)
-            col1.metric("Levene Statistic", f"{result['stat']:.4f}")
+            col1.metric("Levene Statistic", f"{r['stat']:.4f}")
             col2.metric("P-value", f"{r['p_value']:.4f}")
             col3.metric("Jumlah Kelompok", r['n_groups'])
             
@@ -2748,6 +3261,46 @@ elif page == "Hasil & Export":
             
             st.info(f"**Rekomendasi:** {r['recommendation']}")
         
+        # CLUSTERING
+        elif res['type'] == 'clustering':
+            r = res['result']
+            st.subheader(f"Hasil Analisis Clustering")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Metode", res['method'])
+            col2.metric("Jumlah Cluster", r['n_clusters'])
+            col3.metric("Jumlah Fitur", len(res['features']))
+            
+            # Cluster distribution
+            st.markdown("### Distribusi Cluster")
+            cluster_counts = r['data']['Cluster'].value_counts().sort_index()
+            
+            fig = px.pie(
+                values=cluster_counts.values,
+                names=cluster_counts.index,
+                title="Proporsi Cluster",
+                hole=0.4
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Cluster statistics
+            st.markdown("### Karakteristik Setiap Cluster")
+            st.dataframe(r['cluster_stats'], use_container_width=True)
+            
+            st.markdown("### Interpretasi")
+            st.markdown(f'''
+            **Fitur yang Digunakan:** {", ".join(res['features'])}
+            
+            **Hasil Clustering:**
+            - Ditemukan {r['n_clusters']} cluster/kelompok dalam data
+            - Metode: {res['method']}
+            
+            **Cara Membaca:**
+            - Setiap cluster mewakili kelompok data dengan karakteristik serupa
+            - Lihat statistik mean untuk memahami profil setiap cluster
+            - Data dalam cluster yang sama lebih mirip satu sama lain dibanding dengan cluster lain
+            ''')
+
         # ==================== EXPORT SECTION ====================
         st.markdown("---")
         st.markdown("""
@@ -2996,6 +3549,237 @@ elif page == "Kesimpulan":
                 </div>
                 """, unsafe_allow_html=True)
         
+        elif res['type'] == 'multiple_regression':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Regresi Berganda | **Target:** {res['y_var']} | **R²:** {r['r2']:.3f}""")
+            st.success("Model OK" if r['r2'] > 0.7 else "Model Cukup" if r['r2'] > 0.5 else "Model Lemah")
+        
+        elif res['type'] == 'chi_square':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Chi-Square | **Variabel:** {res['var1']} vs {res['var2']} | **P:** {r['p_value']:.4f}""")
+            st.success("Hubungan Kuat" if r['p_value'] < 0.05 else "Hubungan Lemah")
+        
+        elif res['type'] == 'forecast':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Forecasting | **Variabel:** {res['value_var']} | **Akurasi:** {r['r_squared']:.3f}""")
+            st.dataframe(pd.DataFrame({'Periode': [d.strftime('%Y-%m-%d') for d in r['future_dates']], 'Prediksi': r['forecast_values']}))
+        
+        elif res['type'] == 'correlation_matrix':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Correlation Matrix | **Variabel:** {len(res['variables'])} variabel""")
+            st.dataframe(r['corr_pairs'].head(5))
+        
+        elif res['type'] == 'normality':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Uji Normalitas | **Variabel:** {res['var_col']} | **Kesimpulan:** {r['conclusion']}""")
+            st.info("Gunakan parametrik" if r['is_normal_sw'] else "Gunakan non-parametrik")
+        
+        elif res['type'] == 'homogeneity':
+            r = res['result']
+            st.markdown(f"""**Jenis:** Uji Homogenitas | **Kesimpulan:** {r['conclusion']}""")
+            st.info(r['recommendation'])
+
+        elif res['type'] == 'clustering':
+            r = res['result']
+            st.markdown(f'''
+            **Jenis Analisis:** Clustering ({res['method']})
+            
+            **Fitur:** {', '.join(res['features'])}
+            
+            **Temuan Kunci:**
+            - Jumlah cluster: {r['n_clusters']}
+            - Total data: {len(r['data'])}
+            - Metode: {res['method']}
+            - Waktu analisis: {res.get('timestamp', 'N/A')}
+            ''')
+            
+            st.markdown("### Rekomendasi Tindak Lanjut")
+            st.markdown(f'''
+            <div class="info-box">
+                <strong>Clustering Selesai</strong><br><br>
+                <strong>Yang Bisa Dilakukan:</strong><br>
+                1. Analisis profil setiap cluster - apa yang membedakan mereka?<br>
+                2. Beri nama/label yang meaningful untuk setiap cluster<br>
+                3. Strategi berbeda untuk setiap cluster sesuai karakteristiknya<br>
+                4. Identifikasi cluster yang perlu perhatian khusus<br>
+                5. Gunakan hasil clustering untuk segmentasi atau targeting<br>
+                6. Validasi hasil dengan domain knowledge
+            </div>
+            ''', unsafe_allow_html=True)
+
+
+        elif res['type'] == 'gis_map':
+            # Ambil data map dari session
+            df = st.session_state.df
+            lat_col = res.get('lat_col', '')
+            lon_col = res.get('lon_col', '')
+            map_type = res.get('map_type', '')
+            n_points = res.get('n_points', 0)
+            
+            st.markdown(f"""
+            **Jenis Analisis:** Visualisasi Peta GIS
+            
+            **Jenis Peta:** {map_type}
+            
+            **Detail Visualisasi:**
+            - Kolom Latitude: `{lat_col}`
+            - Kolom Longitude: `{lon_col}`
+            - Jumlah titik lokasi: {n_points:,} titik
+            - Waktu analisis: {res.get('timestamp', 'N/A')}
+            """)
+            
+            # Analisis sebaran geografis
+            st.markdown("### Analisis Sebaran Geografis")
+            
+            if df is not None and lat_col and lon_col:
+                try:
+                    # Konversi ke numerik
+                    df_geo = df.copy()
+                    df_geo[lat_col] = pd.to_numeric(df_geo[lat_col], errors='coerce')
+                    df_geo[lon_col] = pd.to_numeric(df_geo[lon_col], errors='coerce')
+                    df_geo_clean = df_geo[[lat_col, lon_col]].dropna()
+                    
+                    if len(df_geo_clean) > 0:
+                        # Hitung statistik geografis
+                        lat_min = df_geo_clean[lat_col].min()
+                        lat_max = df_geo_clean[lat_col].max()
+                        lon_min = df_geo_clean[lon_col].min()
+                        lon_max = df_geo_clean[lon_col].max()
+                        lat_center = df_geo_clean[lat_col].mean()
+                        lon_center = df_geo_clean[lon_col].mean()
+                        
+                        # Hitung rentang area
+                        lat_range = lat_max - lat_min
+                        lon_range = lon_max - lon_min
+                        
+                        # Estimasi area coverage (dalam derajat, aproksimasi kasar)
+                        area_deg = lat_range * lon_range
+                        
+                        st.markdown(f"""
+                        **Cakupan Wilayah:**
+                        - Titik pusat: Latitude {lat_center:.4f}, Longitude {lon_center:.4f}
+                        - Latitude: {lat_min:.4f} hingga {lat_max:.4f} (rentang {lat_range:.4f}°)
+                        - Longitude: {lon_min:.4f} hingga {lon_max:.4f} (rentang {lon_range:.4f}°)
+                        - Area cakupan: ±{area_deg:.4f} derajat persegi
+                        """)
+                        
+                        # Analisis konsentrasi (menggunakan kuartil untuk mendeteksi area padat)
+                        lat_q1 = df_geo_clean[lat_col].quantile(0.25)
+                        lat_q3 = df_geo_clean[lat_col].quantile(0.75)
+                        lon_q1 = df_geo_clean[lon_col].quantile(0.25)
+                        lon_q3 = df_geo_clean[lon_col].quantile(0.75)
+                        
+                        # Hitung titik di area tengah (Q1-Q3)
+                        center_area = df_geo_clean[
+                            (df_geo_clean[lat_col] >= lat_q1) & 
+                            (df_geo_clean[lat_col] <= lat_q3) &
+                            (df_geo_clean[lon_col] >= lon_q1) & 
+                            (df_geo_clean[lon_col] <= lon_q3)
+                        ]
+                        pct_in_center = (len(center_area) / len(df_geo_clean)) * 100
+                        
+                        st.markdown("### Pola Distribusi Spasial")
+                        
+                        if pct_in_center > 60:
+                            st.markdown(f"""
+                            <div class="info-box">
+                                <strong>Pola: Terkonsentrasi</strong><br><br>
+                                {pct_in_center:.1f}% titik lokasi berada di area pusat (50% tengah wilayah).<br><br>
+                                <strong>Interpretasi:</strong><br>
+                                - Sebagian besar aktivitas/data terpusat di satu area geografis<br>
+                                - Area konsentrasi utama: Lat {lat_q1:.4f} - {lat_q3:.4f}, Lon {lon_q1:.4f} - {lon_q3:.4f}<br>
+                                - Menunjukkan adanya hotspot atau zona aktivitas tinggi
+                            </div>
+                            """, unsafe_allow_html=True)
+                        elif pct_in_center < 40:
+                            st.markdown(f"""
+                            <div class="info-box">
+                                <strong>Pola: Tersebar Merata</strong><br><br>
+                                Hanya {pct_in_center:.1f}% titik di area pusat - titik tersebar luas di seluruh wilayah.<br><br>
+                                <strong>Interpretasi:</strong><br>
+                                - Distribusi geografis yang merata<br>
+                                - Tidak ada konsentrasi khusus di satu area<br>
+                                - Cakupan wilayah yang luas dan terdistribusi
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"""
+                            <div class="info-box">
+                                <strong>Pola: Semi-Terkonsentrasi</strong><br><br>
+                                {pct_in_center:.1f}% titik berada di area pusat.<br><br>
+                                <strong>Interpretasi:</strong><br>
+                                - Ada area dengan konsentrasi lebih tinggi, tapi juga tersebar di area lain<br>
+                                - Pola distribusi campuran antara cluster dan sebaran
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Analisis spesifik berdasarkan tipe peta
+                        if map_type == "Peta Cluster":
+                            n_clusters = res.get('n_clusters', 0)
+                            st.markdown(f"""
+                            ### Insight Peta Cluster
+                            
+                            <div class="success-box">
+                                <strong>Cluster Geografis Teridentifikasi</strong><br><br>
+                                - Jumlah kelompok geografis: {n_clusters} cluster<br>
+                                - Total lokasi: {n_points:,} titik<br><br>
+                                <strong>Apa Artinya:</strong><br>
+                                - Setiap warna/marker berbeda menunjukkan kelompok dengan karakteristik serupa<br>
+                                - Cluster yang dekat secara geografis DAN memiliki karakteristik serupa<br>
+                                - Berguna untuk strategi berbasis wilayah
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        elif map_type == "Heatmap":
+                            st.markdown(f"""
+                            ### Insight Heatmap
+                            
+                            <div class="warning-box">
+                                <strong>Peta Densitas/Intensitas</strong><br><br>
+                                - Warna merah/terang: Area dengan densitas/nilai TINGGI<br>
+                                - Warna biru/gelap: Area dengan densitas/nilai RENDAH<br><br>
+                                <strong>Gunakan untuk:</strong><br>
+                                - Identifikasi hotspot (area prioritas tinggi)<br>
+                                - Deteksi area yang kurang terlayani<br>
+                                - Alokasi sumber daya berbasis densitas
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        elif map_type == "Peta Marker":
+                            st.markdown(f"""
+                            ### Insight Peta Marker
+                            
+                            <div class="info-box">
+                                <strong>Visualisasi Titik Individual</strong><br><br>
+                                - Setiap marker mewakili satu lokasi/kejadian<br>
+                                - Klik marker untuk detail informasi<br>
+                                - Total {n_points:,} lokasi ditampilkan<br><br>
+                                <strong>Gunakan untuk:</strong><br>
+                                - Tracking lokasi spesifik<br>
+                                - Verifikasi koordinat<br>
+                                - Eksplorasi detail per titik
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                except Exception as e:
+                    st.warning(f"Tidak dapat menganalisis detail geografis: {str(e)}")
+            
+            # Rekomendasi tindak lanjut
+            st.markdown("### Rekomendasi Tindak Lanjut")
+            st.markdown(f"""
+            <div class="success-box">
+                <strong>Strategi Berbasis Peta GIS</strong><br><br>
+                <strong>Langkah-langkah yang Bisa Dilakukan:</strong><br>
+                1. <strong>Identifikasi Area Prioritas:</strong> Fokus pada zona dengan densitas/aktivitas tinggi<br>
+                2. <strong>Optimasi Rute:</strong> Gunakan sebaran geografis untuk efisiensi operasional<br>
+                3. <strong>Gap Analysis:</strong> Identifikasi area yang belum tercakup atau under-served<br>
+                4. <strong>Strategi Regional:</strong> Buat pendekatan berbeda untuk setiap area geografis<br>
+                5. <strong>Monitoring Berkala:</strong> Update peta secara periodik untuk tracking perubahan<br>
+                6. <strong>Integrasi Data:</strong> Gabungkan dengan data demografi atau geografis eksternal<br>
+                7. <strong>Perencanaan Ekspansi:</strong> Gunakan peta untuk menentukan lokasi baru<br>
+                8. <strong>Reporting:</strong> Gunakan peta untuk presentasi dan laporan visual
+            </div>
+            """, unsafe_allow_html=True)
         # ==================== HISTORY SECTION ====================
         if len(st.session_state.all_analysis_history) > 1:
             st.markdown("---")
@@ -3012,10 +3796,11 @@ elif page == "Kesimpulan":
             
             st.dataframe(history_df, use_container_width=True)
 
+
 # ==================== FOOTER ====================
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"""
 <div style='font-size: 0.8rem; color: #666;'>
     <strong>Dashboard Analisis PSDKP</strong><br>
 </div>
-""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)sd
